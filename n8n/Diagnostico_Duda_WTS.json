@@ -1,5 +1,5 @@
 {
-  "name": "Diagnóstico Duda - Lead → WTS (contato + card + anotação)",
+  "name": "Diagnóstico Duda - Lead → WTS (iniciado + concluído, contato + card + anotação)",
   "nodes": [
     {
       "parameters": {
@@ -24,7 +24,7 @@
           "name": "Diagnóstico Duda - Webhook Secret"
         }
       },
-      "notes": "Recebe o POST do site (N8N_LEAD_WEBHOOK_URL). Credencial Header Auth: Name=Authorization, Value=Bearer <N8N_WEBHOOK_SECRET>."
+      "notes": "Recebe o POST do site (N8N_LEAD_WEBHOOK_URL) nas duas etapas: stage 'iniciado' (clique em Começar) e 'concluido' (última pergunta). Credencial Header Auth: Name=Authorization, Value=Bearer <N8N_WEBHOOK_SECRET>."
     },
     {
       "parameters": {
@@ -55,23 +55,24 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
       "position": [
-        240,
+        220,
         0
       ],
       "notes": "Nesta etapa só o site da Duda cria card. O Frédy cai na saída false (nada acontece)."
     },
     {
       "parameters": {
-        "jsCode": "// Nó \"Montar dados\" (Code, Run Once for All Items)\n// Entrada: body do webhook enviado pelo site (POST /api/leads → N8N_LEAD_WEBHOOK_URL)\nconst b = $input.first().json.body ?? $input.first().json;\n\n// ---- telefone: só dígitos, com DDI 55, no formato que o WTS usa (+55DDDNÚMERO)\nlet digits = String(b.whatsapp || '').replace(/\\D/g, '');\nif (!(digits.startsWith('55') && digits.length >= 12)) digits = '55' + digits;\nconst phone = '+' + digits;\n\n// ---- rótulos\nconst nivelMap = { alta: 'Alta', media: 'Média', inicial: 'Inicial' };\nconst nivel = nivelMap[b.maturity_level] || b.maturity_level || '';\nconst d = b.diagnosis || {};\nconst ans = b.answers || {};\nconst readable = b.answers_readable || {};\n\nconst dataBR = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });\n\n// ---- anotação do card: respostas por bloco\nconst blocks = [];\nfor (const q of (b.answers_detail || [])) {\n  let blk = blocks.find(x => x.name === q.block);\n  if (!blk) { blk = { name: q.block, items: [] }; blocks.push(blk); }\n  blk.items.push(`• ${q.question}\\n  → ${q.answer || '—'}`);\n}\n\nconst note = [\n  `DIAGNÓSTICO DUDA — ${dataBR}`,\n  `Nome: ${b.name}`,\n  `E-mail: ${b.email}`,\n  `WhatsApp: ${phone}`,\n  `Segmento: ${b.segment || '—'}`,\n  ``,\n  `RESULTADO`,\n  `Maturidade: ${nivel} (${b.maturity_score}/${b.max_maturity_score} pts · ${b.maturity_pct}%)`,\n  `Setor de maior impacto: ${b.top_sector}`,\n  `Vendas ${b.vendas_score} · Suporte ${b.atendimento_score}`,\n  `Prazo pra resolver: ${readable.solution_timeline || ans.solution_timeline || '—'}`,\n  `Faturamento: ${readable.revenue || ans.revenue || '—'}`,\n  ``,\n  `RESPOSTAS`,\n  ...blocks.flatMap(blk => [`[${blk.name}]`, ...blk.items, ``]),\n  `DIAGNÓSTICO ENTREGUE`,\n  d.diagnosisText || '',\n  ``,\n  `Próximos passos sugeridos:`,\n  ...((d.nextSteps || []).map(s => `• ${s}`)),\n  ``,\n  `CTA mostrado: ${d.ctaText || '—'}`,\n  `Lead ID (Supabase): ${b.id || '—'}`,\n].join('\\n').slice(0, 8000); // limite da API\n\nreturn [{\n  json: {\n    lead_id: b.id || null,\n    product: b.product || 'duda',\n    name: b.name,\n    email: b.email,\n    phone,\n    segment: b.segment || '',\n    nivel,\n    nivel_key: b.maturity_level,\n    pct: b.maturity_pct,\n    top_sector: b.top_sector,\n    prazo: readable.solution_timeline || ans.solution_timeline || '',\n    faturamento: readable.revenue || ans.revenue || '',\n    card_title: `Diagnóstico Duda · ${b.name} · Maturidade ${nivel} (${b.maturity_pct}%)`,\n    card_description: (d.diagnosisText || '').slice(0, 8000),\n    note,\n    data_br: dataBR,\n  },\n}];\n"
+        "jsCode": "// Nó \"Montar dados\" (Code, Run Once for All Items)\n// Entrada: body do webhook enviado pelo site (N8N_LEAD_WEBHOOK_URL), em duas etapas:\n//   stage \"iniciado\"  → POST /api/leads/start, no clique em \"Começar\" (só contato)\n//   stage \"concluido\" → POST /api/leads, depois da última pergunta (contato + respostas)\n// Payload sem stage (versão antiga do site) = \"concluido\".\nconst b = $input.first().json.body ?? $input.first().json;\nconst stage = b.stage === 'iniciado' ? 'iniciado' : 'concluido';\n\n// ---- telefone: só dígitos, com DDI 55, no formato que o WTS usa (+55DDDNÚMERO)\nlet digits = String(b.whatsapp || '').replace(/\\D/g, '');\nif (!(digits.startsWith('55') && digits.length >= 12)) digits = '55' + digits;\nconst phone = '+' + digits;\n\nconst dataBR = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });\nconst PREFIXO = 'Diagnóstico Duda';\n\n// ======================= ETAPA INICIADO =======================\nif (stage === 'iniciado') {\n  const note = [\n    `DIAGNÓSTICO DUDA — INICIADO em ${dataBR}`,\n    `Preencheu os dados e começou o questionário.`,\n    `Se não aparecer outra anotação com as respostas, parou no meio.`,\n    ``,\n    `Nome: ${b.name}`,\n    `E-mail: ${b.email}`,\n    `WhatsApp: ${phone}`,\n    `Lead ID (Supabase): ${b.id || '—'}`,\n  ].join('\\n');\n\n  return [{\n    json: {\n      stage,\n      lead_id: b.id || null,\n      product: b.product || 'duda',\n      name: b.name,\n      email: b.email,\n      phone,\n      card_prefix: PREFIXO,\n      card_title: `${PREFIXO} · ${b.name} · Em andamento`,\n      card_description: `Começou o diagnóstico em ${dataBR} e ainda não concluiu.`,\n      card_metadata: {\n        origem: 'diagnostico-duda',\n        diagnostico_status: 'iniciado',\n        diagnostico_inicio: dataBR,\n        lead_id: b.id || '',\n      },\n      contact_metadata: {\n        diagnostico_status: 'iniciado',\n        diagnostico_data: dataBR,\n      },\n      note,\n      data_br: dataBR,\n    },\n  }];\n}\n\n// ======================= ETAPA CONCLUIDO =======================\nconst nivelMap = { alta: 'Alta', media: 'Média', inicial: 'Inicial' };\nconst nivel = nivelMap[b.maturity_level] || b.maturity_level || '';\nconst d = b.diagnosis || {};\nconst ans = b.answers || {};\nconst readable = b.answers_readable || {};\nconst prazo = readable.solution_timeline || ans.solution_timeline || '';\nconst faturamento = readable.revenue || ans.revenue || '';\n\n// ---- anotação do card: respostas por bloco\nconst blocks = [];\nfor (const q of (b.answers_detail || [])) {\n  let blk = blocks.find(x => x.name === q.block);\n  if (!blk) { blk = { name: q.block, items: [] }; blocks.push(blk); }\n  blk.items.push(`• ${q.question}\\n  → ${q.answer || '—'}`);\n}\n\nconst note = [\n  `DIAGNÓSTICO DUDA — CONCLUÍDO em ${dataBR}`,\n  `Nome: ${b.name}`,\n  `E-mail: ${b.email}`,\n  `WhatsApp: ${phone}`,\n  `Segmento: ${b.segment || '—'}`,\n  ``,\n  `RESULTADO`,\n  `Maturidade: ${nivel} (${b.maturity_score}/${b.max_maturity_score} pts · ${b.maturity_pct}%)`,\n  `Setor de maior impacto: ${b.top_sector}`,\n  `Vendas ${b.vendas_score} · Suporte ${b.atendimento_score}`,\n  `Prazo pra resolver: ${prazo || '—'}`,\n  `Faturamento: ${faturamento || '—'}`,\n  ``,\n  `RESPOSTAS`,\n  ...blocks.flatMap(blk => [`[${blk.name}]`, ...blk.items, ``]),\n  `DIAGNÓSTICO ENTREGUE`,\n  d.diagnosisText || '',\n  ``,\n  `Próximos passos sugeridos:`,\n  ...((d.nextSteps || []).map(s => `• ${s}`)),\n  ``,\n  `CTA mostrado: ${d.ctaText || '—'}`,\n  `Lead ID (Supabase): ${b.id || '—'}`,\n].join('\\n').slice(0, 8000); // limite da API\n\nreturn [{\n  json: {\n    stage,\n    lead_id: b.id || null,\n    product: b.product || 'duda',\n    name: b.name,\n    email: b.email,\n    phone,\n    segment: b.segment || '',\n    nivel,\n    nivel_key: b.maturity_level,\n    pct: b.maturity_pct,\n    top_sector: b.top_sector,\n    prazo,\n    faturamento,\n    card_prefix: PREFIXO,\n    card_title: `${PREFIXO} · ${b.name} · Maturidade ${nivel} (${b.maturity_pct}%)`,\n    card_description: (d.diagnosisText || '').slice(0, 8000),\n    card_metadata: {\n      origem: 'diagnostico-duda',\n      diagnostico_status: 'concluido',\n      diagnostico_conclusao: dataBR,\n      diagnostico_nivel: nivel,\n      diagnostico_pct: String(b.maturity_pct ?? ''),\n      diagnostico_setor: b.top_sector || '',\n      diagnostico_prazo: prazo,\n      diagnostico_faturamento: faturamento,\n      lead_id: b.id || '',\n    },\n    contact_metadata: {\n      diagnostico_status: 'concluido',\n      diagnostico_nivel: nivel,\n      diagnostico_pct: String(b.maturity_pct ?? ''),\n      diagnostico_setor: b.top_sector || '',\n      diagnostico_segmento: b.segment || '',\n      diagnostico_data: dataBR,\n    },\n    note,\n    data_br: dataBR,\n  },\n}];\n"
       },
       "id": "975df57f-579a-4755-9273-058bbfa93a47",
       "name": "Montar dados",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        480,
+        440,
         -80
-      ]
+      ],
+      "notes": "Monta contato, card e anotação conforme a etapa (iniciado/concluido). Código também em n8n/montar_dados.js."
     },
     {
       "parameters": {
@@ -81,7 +82,7 @@
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({\n  name: $json.name,\n  phoneNumber: $json.phone,\n  email: $json.email,\n  tagNames: ['Diagnóstico Duda'],\n  metadata: {\n    diagnostico_nivel: $json.nivel,\n    diagnostico_pct: String($json.pct),\n    diagnostico_setor: $json.top_sector,\n    diagnostico_segmento: $json.segment,\n    diagnostico_data: $json.data_br\n  },\n  options: {\n    upsert: true,\n    upsertFields: ['Name', 'Email', 'Tags', 'Metadata'],\n    upsertTagOperation: 'INSERTIFNOTEXISTS'\n  }\n}) }}",
+        "jsonBody": "={{ JSON.stringify({\n  name: $json.name,\n  phoneNumber: $json.phone,\n  email: $json.email,\n  tagNames: ['Diagnóstico Duda'],\n  metadata: $json.contact_metadata,\n  options: {\n    upsert: true,\n    upsertFields: ['Name', 'Email', 'Tags', 'Metadata'],\n    upsertTagOperation: 'INSERTIFNOTEXISTS'\n  }\n}) }}",
         "options": {}
       },
       "id": "8b9d29a7-5d2b-45d4-bdd8-bef16247eb31",
@@ -89,7 +90,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        720,
+        660,
         -80
       ],
       "credentials": {
@@ -102,21 +103,38 @@
     },
     {
       "parameters": {
-        "method": "POST",
         "url": "https://api.wts.chat/crm/v2/panel/card",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({\n  stepId: 'a80658c9-4327-405a-a848-2ed69995517d',\n  title: $('Montar dados').item.json.card_title,\n  description: $('Montar dados').item.json.card_description,\n  contactIds: [$json.id],\n  tagNames: ['Duda', 'Diagnóstico Duda'],\n  metadata: {\n    origem: 'diagnostico-duda',\n    diagnostico_nivel: $('Montar dados').item.json.nivel,\n    diagnostico_pct: String($('Montar dados').item.json.pct),\n    diagnostico_setor: $('Montar dados').item.json.top_sector,\n    diagnostico_prazo: $('Montar dados').item.json.prazo,\n    diagnostico_faturamento: $('Montar dados').item.json.faturamento,\n    lead_id: $('Montar dados').item.json.lead_id || ''\n  }\n}) }}",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "PanelId",
+              "value": "b92678e3-82c8-4a36-a7cc-4d337a7f1f31"
+            },
+            {
+              "name": "ContactId",
+              "value": "={{ $json.id }}"
+            },
+            {
+              "name": "Statuses",
+              "value": "OPEN"
+            },
+            {
+              "name": "PageSize",
+              "value": "50"
+            }
+          ]
+        },
         "options": {}
       },
-      "id": "4f7b9010-b5ca-43e3-b8fb-e3fc47249b8f",
-      "name": "Criar card",
+      "id": "52eb80a2-086c-41fc-ac41-ba85b8300901",
+      "name": "Buscar card do diagnóstico",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        960,
+        880,
         -80
       ],
       "credentials": {
@@ -125,7 +143,142 @@
           "name": "WTS API - SDR Duda"
         }
       },
-      "notes": "Painel Funil Comercial - Duda/Frédy (b92678e3-82c8-4a36-a7cc-4d337a7f1f31), etapa Consciência. Se a etiqueta não colar por nome, troque tagNames por tagIds (GET crm/v1/panel/{id}?IncludeDetails=Tags)."
+      "onError": "continueRegularOutput",
+      "notes": "Cards OPEN do contato no Funil Comercial - Duda/Frédy. Se der erro, segue como 'sem card' (cria um novo, nunca perde o lead)."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Nó \"Decidir ação\" (Code, Run Once for All Items)\n// Entrada: resposta do \"Buscar card do diagnóstico\" (GET crm/v2/panel/card, cards OPEN do contato no painel).\n// Saída: acao = criar | atualizar | ignorar\n//   iniciado  + já tem card aberto do diagnóstico → ignorar (recomeçou; não duplica)\n//   iniciado  + sem card                          → criar (card \"Em andamento\")\n//   concluido + tem card aberto do diagnóstico    → atualizar (título/descrição/metadados) + anotação\n//   concluido + sem card                          → criar + anotação (ex.: o \"iniciado\" falhou)\nconst m = $('Montar dados').first().json;\nconst contactId = $('Criar/atualizar contato').first().json.id;\nconst res = $input.first().json || {};\nconst items = Array.isArray(res.items) ? res.items : [];\n\n// Card do diagnóstico = metadado origem OU título com o prefixo (cards do SDR no mesmo painel ficam de fora)\nconst doDiagnostico = (c) =>\n  (c.metadata && c.metadata.origem === m.card_metadata.origem) ||\n  String(c.title || '').startsWith(`${m.card_prefix} ·`);\n\nconst card = items\n  .filter((c) => c && c.id && doDiagnostico(c))\n  .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0];\n\nlet acao;\nif (m.stage === 'iniciado') acao = card ? 'ignorar' : 'criar';\nelse acao = card ? 'atualizar' : 'criar';\n\nreturn [{ json: { acao, card_id: card ? card.id : null, contact_id: contactId, stage: m.stage } }];\n"
+      },
+      "id": "eb4ab382-2b85-4331-950a-3bb6552ceade",
+      "name": "Decidir ação",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        -80
+      ],
+      "notes": "criar | atualizar | ignorar. Código também em n8n/decidir_acao.js."
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "54e0d967-4ee0-48b5-8877-996de7c05f99",
+                    "leftValue": "={{ $json.acao }}",
+                    "rightValue": "criar",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "criar"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "f7b6a775-310c-4af0-a824-699d42fc713a",
+                    "leftValue": "={{ $json.acao }}",
+                    "rightValue": "atualizar",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "atualizar"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "13c86b25-76f9-44e0-bd50-3832a6ad8a20",
+      "name": "Ação?",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        1320,
+        -80
+      ],
+      "notes": "'ignorar' não tem saída: recomeçou o diagnóstico e já existe card aberto."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.wts.chat/crm/v2/panel/card",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  stepId: '34039e39-24ae-49a1-85f1-cd46dd8ecd6c',\n  title: $('Montar dados').first().json.card_title,\n  description: $('Montar dados').first().json.card_description,\n  contactIds: [$json.contact_id],\n  tagNames: ['Duda', 'Diagnóstico Duda'],\n  metadata: $('Montar dados').first().json.card_metadata\n}) }}",
+        "options": {}
+      },
+      "id": "4f7b9010-b5ca-43e3-b8fb-e3fc47249b8f",
+      "name": "Criar card",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1560,
+        -180
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "",
+          "name": "WTS API - SDR Duda"
+        }
+      },
+      "notes": "Painel Funil Comercial - Duda/Frédy (b92678e3-82c8-4a36-a7cc-4d337a7f1f31), etapa 34039e39-24ae-49a1-85f1-cd46dd8ecd6c. Se a etiqueta não colar por nome, troque tagNames por tagIds (GET crm/v1/panel/{id}?IncludeDetails=Tags)."
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "=https://api.wts.chat/crm/v3/panel/card/{{ $json.card_id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  fields: ['Title', 'Description', 'Metadata'],\n  title: $('Montar dados').first().json.card_title,\n  description: $('Montar dados').first().json.card_description,\n  metadata: $('Montar dados').first().json.card_metadata\n}) }}",
+        "options": {}
+      },
+      "id": "487bc67a-e516-4c39-8756-cdce6ddaf47e",
+      "name": "Atualizar card",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1560,
+        20
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "",
+          "name": "WTS API - SDR Duda"
+        }
+      },
+      "notes": "Completa o card criado no 'Começar'. Não mexe na etapa: se o comercial já moveu o card, ele fica onde está."
     },
     {
       "parameters": {
@@ -135,15 +288,15 @@
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ text: $('Montar dados').item.json.note }) }}",
+        "jsonBody": "={{ JSON.stringify({ text: $('Montar dados').first().json.note }) }}",
         "options": {}
       },
       "id": "0b0d8623-4a14-4d44-9e23-43d0cbc90347",
-      "name": "Anotar respostas no card",
+      "name": "Anotar no card",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1200,
+        1800,
         -80
       ],
       "credentials": {
@@ -152,20 +305,22 @@
           "name": "WTS API - SDR Duda"
         }
       },
-      "notes": "POST crm/v1/panel/card/{cardId}/note — texto com resultado + todas as perguntas/respostas (máx 8000 chars)."
+      "notes": "Recebe o card de 'Criar card' ou 'Atualizar card' ($json.id). iniciado = anotação curta; concluido = respostas completas."
     },
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "UPDATE public.leads SET crm_card_id = '{{ $('Criar card').item.json.id }}' WHERE id = '{{ $('Montar dados').item.json.lead_id }}';",
-        "options": {}
+        "query": "UPDATE public.leads SET crm_card_id = $1 WHERE id = $2::uuid AND crm_card_id IS NULL;",
+        "options": {
+          "queryReplacement": "={{ [$json.cardId, $('Montar dados').first().json.lead_id] }}"
+        }
       },
       "id": "012fb338-ecda-4d52-84a6-1f372f38ccb0",
       "name": "Gravar card_id no Supabase",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
       "position": [
-        1440,
+        2040,
         -80
       ],
       "disabled": true,
@@ -175,7 +330,7 @@
           "name": "Postgres Supabase Téte"
         }
       },
-      "notes": "Opcional. Ative quando a tabela leads existir no Supabase (migration 0001_leads.sql) e o site estiver com SUPABASE_URL configurado (lead_id vem preenchido)."
+      "notes": "Desativado. Ative quando a tabela leads existir (migrations 0001 e 0002). Só roda se o lead tiver id."
     }
   ],
   "connections": {
@@ -217,7 +372,47 @@
       "main": [
         [
           {
+            "node": "Buscar card do diagnóstico",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar card do diagnóstico": {
+      "main": [
+        [
+          {
+            "node": "Decidir ação",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decidir ação": {
+      "main": [
+        [
+          {
+            "node": "Ação?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ação?": {
+      "main": [
+        [
+          {
             "node": "Criar card",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Atualizar card",
             "type": "main",
             "index": 0
           }
@@ -228,14 +423,25 @@
       "main": [
         [
           {
-            "node": "Anotar respostas no card",
+            "node": "Anotar no card",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Anotar respostas no card": {
+    "Atualizar card": {
+      "main": [
+        [
+          {
+            "node": "Anotar no card",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anotar no card": {
       "main": [
         [
           {
@@ -254,7 +460,7 @@
   },
   "active": false,
   "pinData": {},
-  "versionId": "04c34ba5-fbfc-4986-b873-09853314f2a7",
+  "versionId": "06f8065b-5f9e-4b63-a318-19a379164d40",
   "meta": {
     "instanceId": "import"
   }

@@ -1,20 +1,67 @@
 // Nó "Montar dados" (Code, Run Once for All Items)
-// Entrada: body do webhook enviado pelo site (POST /api/leads → N8N_LEAD_WEBHOOK_URL)
+// Entrada: body do webhook enviado pelo site (N8N_LEAD_WEBHOOK_URL), em duas etapas:
+//   stage "iniciado"  → POST /api/leads/start, no clique em "Começar" (só contato)
+//   stage "concluido" → POST /api/leads, depois da última pergunta (contato + respostas)
+// Payload sem stage (versão antiga do site) = "concluido".
 const b = $input.first().json.body ?? $input.first().json;
+const stage = b.stage === 'iniciado' ? 'iniciado' : 'concluido';
 
 // ---- telefone: só dígitos, com DDI 55, no formato que o WTS usa (+55DDDNÚMERO)
 let digits = String(b.whatsapp || '').replace(/\D/g, '');
 if (!(digits.startsWith('55') && digits.length >= 12)) digits = '55' + digits;
 const phone = '+' + digits;
 
-// ---- rótulos
+const dataBR = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+const PREFIXO = 'Diagnóstico Frédy';
+
+// ======================= ETAPA INICIADO =======================
+if (stage === 'iniciado') {
+  const note = [
+    `DIAGNÓSTICO FRÉDY — INICIADO em ${dataBR}`,
+    `Preencheu os dados e começou o questionário.`,
+    `Se não aparecer outra anotação com as respostas, parou no meio.`,
+    ``,
+    `Nome: ${b.name}`,
+    `E-mail: ${b.email}`,
+    `WhatsApp: ${phone}`,
+    `Lead ID (Supabase): ${b.id || '—'}`,
+  ].join('\n');
+
+  return [{
+    json: {
+      stage,
+      lead_id: b.id || null,
+      product: b.product || 'fredy',
+      name: b.name,
+      email: b.email,
+      phone,
+      card_prefix: PREFIXO,
+      card_title: `${PREFIXO} · ${b.name} · Em andamento`,
+      card_description: `Começou o diagnóstico em ${dataBR} e ainda não concluiu.`,
+      card_metadata: {
+        origem: 'diagnostico-fredy',
+        diagnostico_status: 'iniciado',
+        diagnostico_inicio: dataBR,
+        lead_id: b.id || '',
+      },
+      contact_metadata: {
+        diagnostico_status: 'iniciado',
+        diagnostico_data: dataBR,
+      },
+      note,
+      data_br: dataBR,
+    },
+  }];
+}
+
+// ======================= ETAPA CONCLUIDO =======================
 const nivelMap = { alta: 'Alta', media: 'Média', inicial: 'Inicial' };
 const nivel = nivelMap[b.maturity_level] || b.maturity_level || '';
 const d = b.diagnosis || {};
 const ans = b.answers || {};
 const readable = b.answers_readable || {};
-
-const dataBR = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+const prazo = readable.solution_timeline || ans.solution_timeline || '';
+const faturamento = readable.revenue || ans.revenue || '';
 
 // ---- anotação do card: respostas por bloco
 const blocks = [];
@@ -25,7 +72,7 @@ for (const q of (b.answers_detail || [])) {
 }
 
 const note = [
-  `DIAGNÓSTICO FRÉDY — ${dataBR}`,
+  `DIAGNÓSTICO FRÉDY — CONCLUÍDO em ${dataBR}`,
   `Nome: ${b.name}`,
   `E-mail: ${b.email}`,
   `WhatsApp: ${phone}`,
@@ -35,8 +82,8 @@ const note = [
   `Maturidade: ${nivel} (${b.maturity_score}/${b.max_maturity_score} pts · ${b.maturity_pct}%)`,
   `Setor de maior impacto: ${b.top_sector}`,
   `Vendas ${b.vendas_score} · Atendimento ${b.atendimento_score} · Pós-viagem ${b.pos_venda_score}`,
-  `Prazo pra resolver: ${readable.solution_timeline || ans.solution_timeline || '—'}`,
-  `Faturamento: ${readable.revenue || ans.revenue || '—'}`,
+  `Prazo pra resolver: ${prazo || '—'}`,
+  `Faturamento: ${faturamento || '—'}`,
   ``,
   `RESPOSTAS`,
   ...blocks.flatMap(blk => [`[${blk.name}]`, ...blk.items, ``]),
@@ -52,6 +99,7 @@ const note = [
 
 return [{
   json: {
+    stage,
     lead_id: b.id || null,
     product: b.product || 'fredy',
     name: b.name,
@@ -62,10 +110,30 @@ return [{
     nivel_key: b.maturity_level,
     pct: b.maturity_pct,
     top_sector: b.top_sector,
-    prazo: readable.solution_timeline || ans.solution_timeline || '',
-    faturamento: readable.revenue || ans.revenue || '',
-    card_title: `Diagnóstico Frédy · ${b.name} · Maturidade ${nivel} (${b.maturity_pct}%)`,
+    prazo,
+    faturamento,
+    card_prefix: PREFIXO,
+    card_title: `${PREFIXO} · ${b.name} · Maturidade ${nivel} (${b.maturity_pct}%)`,
     card_description: (d.diagnosisText || '').slice(0, 8000),
+    card_metadata: {
+      origem: 'diagnostico-fredy',
+      diagnostico_status: 'concluido',
+      diagnostico_conclusao: dataBR,
+      diagnostico_nivel: nivel,
+      diagnostico_pct: String(b.maturity_pct ?? ''),
+      diagnostico_setor: b.top_sector || '',
+      diagnostico_prazo: prazo,
+      diagnostico_faturamento: faturamento,
+      lead_id: b.id || '',
+    },
+    contact_metadata: {
+      diagnostico_status: 'concluido',
+      diagnostico_nivel: nivel,
+      diagnostico_pct: String(b.maturity_pct ?? ''),
+      diagnostico_setor: b.top_sector || '',
+      diagnostico_segmento: b.segment || '',
+      diagnostico_data: dataBR,
+    },
     note,
     data_br: dataBR,
   },

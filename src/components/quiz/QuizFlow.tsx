@@ -20,6 +20,16 @@ interface Persisted {
   contact: ContactInput;
   answers: Answers;
   startedAt: number;
+  /** id do lead devolvido pelo /api/leads/start (Supabase); completa a mesma linha no fim */
+  leadId: string | null;
+  /** contato já enviado como "iniciado" (evita reenviar se a pessoa só voltar e avançar) */
+  startedKey: string;
+}
+
+const START_WAIT_MS = 4_000;
+
+function contactKey(c: ContactInput): string {
+  return [c.name.trim().toLowerCase(), c.email.trim().toLowerCase(), c.whatsapp.replace(/\D/g, "")].join("|");
 }
 
 const EMPTY: Persisted = {
@@ -27,6 +37,8 @@ const EMPTY: Persisted = {
   contact: { name: "", email: "", whatsapp: "" },
   answers: {},
   startedAt: 0,
+  leadId: null,
+  startedKey: "",
 };
 
 function load(): Persisted {
@@ -47,6 +59,8 @@ export function QuizFlow() {
   const [diagnosis, setDiagnosis] = useState<Diagnosis | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("saving");
   const honeypot = useRef("");
+  /** POST do "Começar" ainda em voo: o envio final espera ele (até START_WAIT_MS) pra pegar o leadId */
+  const startRequest = useRef<Promise<string | null> | null>(null);
   const topRef = useRef<HTMLDivElement>(null);
 
   // Restaura progresso (refresh não perde o que já respondeu)
@@ -72,29 +86,64 @@ export function QuizFlow() {
   const question = step >= 1 && step <= TOTAL_QUESTIONS ? quizQuestions[step - 1] : null;
   const progress = step === CONTACT_STEP ? 0 : step >= RESULT_STEP ? 100 : ((step - 1) / TOTAL_QUESTIONS) * 100;
 
-  const handleContact = useCallback((c: Contact) => {
-    setState((s) => ({
-      ...s,
-      contact: { name: c.name, email: c.email, whatsapp: c.whatsapp },
-      step: 1,
-      startedAt: s.startedAt || Date.now(),
-    }));
+  /** Etapa "iniciado": registra o lead (Supabase + n8n → contato e card no WTS) já no "Começar" */
+  const startLead = useCallback((c: Contact) => {
+    const request = fetch("/api/leads/start", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ contact: c, website: honeypot.current || undefined }),
+      keepalive: true, // segue mesmo se a pessoa fechar a aba logo depois
+    })
+      .then((res) => (res.ok ? (res.json() as Promise<{ id?: string | null }>) : null))
+      .then((data) => (typeof data?.id === "string" ? data.id : null))
+      .catch(() => null);
+    startRequest.current = request;
+    void request.then((id) => {
+      if (id && startRequest.current === request) setState((s) => ({ ...s, leadId: id }));
+    });
   }, []);
+
+  const handleContact = useCallback(
+    (c: Contact) => {
+      const key = contactKey(c);
+      const changed = key !== state.startedKey;
+      if (changed) startLead(c);
+      setState((s) => ({
+        ...s,
+        contact: { name: c.name, email: c.email, whatsapp: c.whatsapp },
+        step: 1,
+        startedAt: s.startedAt || Date.now(),
+        startedKey: key,
+        // contato novo = lead novo: o id antigo não vale mais
+        leadId: changed ? null : s.leadId,
+      }));
+    },
+    [state.startedKey, startLead],
+  );
 
   const setAnswer = useCallback((id: string, value: string | string[]) => {
     setState((s) => ({ ...s, answers: { ...s.answers, [id]: value } }));
   }, []);
 
   const submitLead = useCallback(
-    async (finalAnswers: Answers, c: ContactInput, startedAt: number) => {
+    async (finalAnswers: Answers, c: ContactInput, startedAt: number, knownLeadId: string | null) => {
       setSaveState("saving");
       try {
+        // Se o POST do "Começar" ainda não voltou, espera um pouco pelo id (sem travar o envio)
+        let leadId = knownLeadId;
+        if (!leadId && startRequest.current) {
+          leadId = await Promise.race([
+            startRequest.current,
+            new Promise<null>((r) => setTimeout(() => r(null), START_WAIT_MS)),
+          ]);
+        }
         const res = await fetch("/api/leads", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             contact: c,
             answers: finalAnswers,
+            leadId: leadId ?? undefined,
             website: honeypot.current || undefined,
             startedAt: startedAt || undefined,
           }),
@@ -120,8 +169,8 @@ export function QuizFlow() {
     const result = generateDiagnosis(answers);
     setDiagnosis(result);
     setState((s) => ({ ...s, step: RESULT_STEP }));
-    void submitLead(answers, contact, state.startedAt);
-  }, [step, answers, contact, state.startedAt, submitLead]);
+    void submitLead(answers, contact, state.startedAt, state.leadId);
+  }, [step, answers, contact, state.startedAt, state.leadId, submitLead]);
 
   const back = useCallback(() => {
     setState((s) => ({ ...s, step: Math.max(CONTACT_STEP, s.step - 1) }));
@@ -130,6 +179,7 @@ export function QuizFlow() {
   const restart = useCallback(() => {
     setDiagnosis(null);
     setSaveState("saving");
+    startRequest.current = null;
     setState({ ...EMPTY, startedAt: Date.now() });
     try {
       sessionStorage.removeItem(STORAGE_KEY);

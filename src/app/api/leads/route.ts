@@ -5,6 +5,7 @@ import { quizQuestions, SEGMENT_LABELS } from "@/lib/questions";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { PRODUCT } from "@/products";
 import { rateLimit } from "@/lib/rate-limit";
+import { clientIp, isMissingColumn, notifyN8n } from "@/lib/n8n";
 
 export const runtime = "nodejs";
 
@@ -12,11 +13,7 @@ const MAX_BODY_BYTES = 32 * 1024;
 
 export async function POST(req: NextRequest) {
   // 1. Rate limit por IP
-  const ip =
-    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-    req.headers.get("x-real-ip") ||
-    "unknown";
-  const rl = rateLimit(ip);
+  const rl = rateLimit(clientIp(req));
   if (!rl.ok) {
     return NextResponse.json(
       { error: "Muitos envios. Tente de novo em alguns minutos." },
@@ -44,7 +41,7 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
-  const { contact, answers, website, startedAt } = parsed.data;
+  const { contact, answers, leadId, website, startedAt } = parsed.data;
 
   // 4. Anti-bot: honeypot preenchido ou formulário "respondido" em < 5s
   if (website) return NextResponse.json({ ok: true }, { status: 200 }); // finge sucesso
@@ -94,44 +91,54 @@ export async function POST(req: NextRequest) {
   };
 
   // 6. Persistência (Supabase). Sem env configurado, segue sem salvar (dev local).
-  let id: string | null = null;
-  const supabase = getSupabaseAdmin();
-  if (supabase) {
-    const { data, error } = await supabase.from("leads").insert(row).select("id").single();
-    if (error) {
-      console.error("[leads] supabase insert failed:", error.message);
-    } else {
-      id = data.id as string;
-    }
-  }
+  //    Se veio leadId (criado no "Começar"), completa a mesma linha; senão insere uma nova.
+  const id = await persistLead(row, leadId);
 
-  // 7. Webhook n8n → card no CRM Frédy (best-effort, com timeout)
-  await notifyN8n({ id, product: PRODUCT.key, ...row, answers_detail: answersDetail, diagnosis });
+  // 7. Webhook n8n → completa o card criado no "Começar" (ou cria, se não houver)
+  await notifyN8n({
+    stage: "concluido",
+    id,
+    product: PRODUCT.key,
+    ...row,
+    answers_detail: answersDetail,
+    diagnosis,
+  });
 
   const persisted = id !== null || Boolean(process.env.N8N_LEAD_WEBHOOK_URL);
   return NextResponse.json({ ok: true, id, persisted, diagnosis }, { status: 201 });
 }
 
-async function notifyN8n(payload: unknown) {
-  const url = process.env.N8N_LEAD_WEBHOOK_URL;
-  if (!url) return;
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 6_000);
-  try {
-    const headers: Record<string, string> = { "content-type": "application/json" };
-    if (process.env.N8N_WEBHOOK_SECRET) {
-      headers.authorization = `Bearer ${process.env.N8N_WEBHOOK_SECRET}`;
-    }
-    const res = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-      signal: ctrl.signal,
-    });
-    if (!res.ok) console.error("[leads] n8n webhook status", res.status);
-  } catch (err) {
-    console.error("[leads] n8n webhook failed:", (err as Error).message);
-  } finally {
-    clearTimeout(t);
+type LeadRow = Record<string, unknown> & { whatsapp: string };
+
+async function persistLead(row: LeadRow, leadId: string | undefined): Promise<string | null> {
+  const supabase = getSupabaseAdmin();
+  if (!supabase) return null;
+
+  const stageCols = { stage: "concluido", completed_at: new Date().toISOString() };
+
+  // a) Completa a linha do "Começar". Só casa se for o mesmo WhatsApp e ainda estiver
+  //    "iniciado": um leadId adulterado no navegador não sobrescreve lead de outra pessoa.
+  if (leadId) {
+    const { data, error } = await supabase
+      .from("leads")
+      .update({ ...row, ...stageCols })
+      .eq("id", leadId)
+      .eq("whatsapp", row.whatsapp)
+      .eq("stage", "iniciado")
+      .select("id")
+      .maybeSingle();
+    if (error) console.error("[leads] supabase update failed:", error.message);
+    else if (data) return data.id as string;
   }
+
+  // b) Sem linha pra completar: insere. Se a migration 0002 não rodou ainda, insere sem as colunas novas.
+  let { data, error } = await supabase.from("leads").insert({ ...row, ...stageCols }).select("id").single();
+  if (isMissingColumn(error)) {
+    ({ data, error } = await supabase.from("leads").insert(row).select("id").single());
+  }
+  if (error || !data) {
+    console.error("[leads] supabase insert failed:", error?.message);
+    return null;
+  }
+  return data.id as string;
 }

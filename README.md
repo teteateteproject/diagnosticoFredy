@@ -57,23 +57,38 @@ Sem `.env.local` o app funciona inteiro: o diagnóstico é calculado e exibido, 
 
 ## Banco
 
-Rode `supabase/migrations/0001_leads.sql` no SQL Editor (ou `supabase db push`). A tabela `leads` fica com RLS ligado e **sem política** pra `anon`/`authenticated`: só a service role (no route handler) lê e escreve.
+Rode `supabase/migrations/0001_leads.sql` e depois `0002_lead_stage.sql` no SQL Editor (ou `supabase db push`). A 0002 adiciona `stage` (`iniciado`/`concluido`) e `completed_at`, e deixa respostas/diagnóstico opcionais (só chegam na conclusão). A tabela `leads` fica com RLS ligado e **sem política** pra `anon`/`authenticated`: só a service role (no route handler) lê e escreve.
 
 ## Fluxo
 
 ```
 /                      landing (hero, como funciona, o que recebe, CTA)
 /diagnostico           contato → perguntas → resultado (client, estado em sessionStorage)
-POST /api/leads        valida (zod) → rate limit → honeypot → calcula diagnóstico no servidor
-                       → insert Supabase → POST webhook n8n (best-effort, timeout 6s)
+POST /api/leads/start  no "Começar": valida contato → rate limit → honeypot
+                       → insert Supabase (stage iniciado) → webhook n8n stage "iniciado"
+POST /api/leads        na última pergunta: valida (zod) → rate limit → honeypot → calcula diagnóstico
+                       → completa a linha do start (ou insere) → webhook n8n stage "concluido"
 ```
+
+O "Começar" dispara uma vez por contato (voltar e avançar sem mudar os dados não reenvia). Assim quem abandona no meio do quiz já está no CRM com card "Em andamento"; na conclusão o n8n atualiza o mesmo card (ver `n8n/README.md`).
 
 O diagnóstico aparece na tela na hora (calculado no cliente com a mesma função) e o POST roda em paralelo. O servidor **recalcula** a pontuação a partir das respostas; nunca aceita score vindo do navegador.
 
 ## Payload que chega no n8n
 
+Etapa `iniciado` (no "Começar"):
+
+```json
+{ "stage": "iniciado", "id": "uuid-ou-null", "product": "duda", "name": "Mariana Souza",
+  "email": "m@empresa.com.br", "whatsapp": "48999991234", "source": "diagnostico-duda",
+  "started_at": "2026-10-16T13:39:42.941Z" }
+```
+
+Etapa `concluido` (na última pergunta):
+
 ```json
 {
+  "stage": "concluido",
   "id": "uuid-ou-null",
   "name": "Mariana Souza",
   "email": "m@agencia.com.br",
@@ -90,7 +105,7 @@ O diagnóstico aparece na tela na hora (calculado no cliente com a mesma funçã
 }
 ```
 
-Sugestão de workflow: Webhook (valida o Bearer) → Set (monta card) → WTS `POST /crm/v1/panel/card` no painel de leads do diagnóstico → `PATCH` do `crm_card_id` de volta no Supabase.
+Workflow pronto em `n8n/Diagnostico_Duda_WTS.json` (contato + card + anotação, nas duas etapas).
 
 ## Editar o diagnóstico
 

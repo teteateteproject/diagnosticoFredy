@@ -28,10 +28,21 @@ export const answersSchema = z.object(answerShape).strict();
 
 export type AnswersPayload = z.infer<typeof answersSchema>;
 
-/** Corpo do POST /api/leads */
+/** Corpo do POST /api/leads/start (etapa "iniciado": só o contato, no clique em "Começar") */
+export const leadStartSchema = z.object({
+  contact: contactSchema,
+  /** honeypot: campo invisível; bots preenchem, humanos não */
+  website: z.string().max(500).optional(),
+});
+
+export type LeadStartPayload = z.infer<typeof leadStartSchema>;
+
+/** Corpo do POST /api/leads (etapa "concluido": contato + respostas) */
 export const leadPayloadSchema = z.object({
   contact: contactSchema,
   answers: answersSchema,
+  /** id do lead criado no /api/leads/start (Supabase), pra completar a mesma linha */
+  leadId: z.uuid().optional(),
   /** honeypot: campo invisível; bots preenchem, humanos não */
   website: z.string().max(500).optional(),
   startedAt: z.number().int().positive().optional(),

@@ -58,8 +58,11 @@ export const metadata: Metadata = {
     template: `%s · ${CONFIG.siteName}`,
   },
   description: CONFIG.description,
+  // canonical e og:url no domínio oficial (os endereços *.vercel.app apontam pra ele)
+  alternates: { canonical: "/" },
   openGraph: {
     type: "website",
+    url: "/",
     locale: "pt_BR",
     siteName: CONFIG.siteName,
     title: `${CONFIG.siteName} — Maturidade em IA para ${CONFIG.audience}`,

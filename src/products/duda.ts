@@ -194,7 +194,7 @@ export const duda: ProductDefinition = {
   audience: "empresas que vendem pelo WhatsApp",
   tagline: "Gestão de vendas com IA para empresas com vários vendedores e canais.",
   whatsappDefault: "554840034215",
-  siteUrlDefault: "https://diagnostico.duda.app",
+  siteUrlDefault: "https://www.diagnosticocomaduda.com.br",
   description:
     "Descubra em 3 minutos o nível de maturidade da sua empresa em IA e onde a Duda traz mais resultado: vendas ou suporte.",
   totalMinutes: 3,
